@@ -1,4 +1,5 @@
 import os
+from collections import Counter
 
 import torch
 import torch.nn as nn
@@ -16,14 +17,15 @@ from sklearn.metrics import precision_score, recall_score, f1_score, confusion_m
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 num_epochs = 20
-batch_size = 25
+batch_size = 36
 learning_rate = 0.0001
 
 train_transform = transforms.Compose([
     transforms.Resize((256, 256)),
-    transforms.ToTensor(),
     transforms.RandomHorizontalFlip(),
     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+    transforms.RandomRotation(30),
+    transforms.ToTensor(),
     transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
 ])
 
@@ -37,11 +39,14 @@ train_dir = 'dataset/train'
 val_dir = 'dataset/validation'
 test_dir = 'dataset/test'
 
-train_dataset = datasets.ImageFolder(root=train_dir, transform=train_transform)
+original_train_dataset = datasets.ImageFolder(root=train_dir, transform=val_transform)
+augmented_train_dataset = datasets.ImageFolder(root=train_dir, transform=train_transform)
+
+combined_train_dataset = torch.utils.data.ConcatDataset([original_train_dataset, augmented_train_dataset])
 val_dataset = datasets.ImageFolder(root=val_dir, transform=val_transform)
 test_dataset = datasets.ImageFolder(root=test_dir, transform=val_transform)
 
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+train_loader = DataLoader(combined_train_dataset, batch_size=batch_size, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
@@ -51,62 +56,49 @@ class FruitsAndVegetablesRecognizer(nn.Module):
     def __init__(self, num_classes, init_method="xavier"):
         super(FruitsAndVegetablesRecognizer, self).__init__()
         self.num_classes = num_classes
-
-        self.conv1 = nn.Conv2d(3, 16, kernel_size=2, padding=1)  # Output: 256x256x16
-        self.bn1 = nn.BatchNorm2d(16)
-        self.conv2 = nn.Conv2d(16, 32, kernel_size=2, padding=1)  # Output: 256x256x32
-        self.bn2 = nn.BatchNorm2d(32)
-        self.conv3 = nn.Conv2d(32, 64, kernel_size=2, padding=1)  # Output: 256x256x64
-        self.bn3 = nn.BatchNorm2d(64)
-        self.conv4 = nn.Conv2d(64, 64, kernel_size=2, padding=1)  # Output: 256x256x64
+        # 256x256x3
+        self.conv1 = nn.Conv2d(3, 8, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(8)
+        # 128x128x16
+        self.conv2 = nn.Conv2d(8, 16, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(16)
+        # 64x64x32
+        self.conv3 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm2d(32)
+        # 32x32x64
+        self.conv4 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
         self.bn4 = nn.BatchNorm2d(64)
-        self.conv5 = nn.Conv2d(64, 96, kernel_size=2, padding=1)  # Output: 256x256x96
-        self.bn5 = nn.BatchNorm2d(96)
-        self.conv6 = nn.Conv2d(96, 128, kernel_size=2, padding=1)  # Output: 256x256x128
-        self.bn6 = nn.BatchNorm2d(128)
-        self.pool = nn.MaxPool2d(2, 2)  # Reduces dimensions by half
+        # 16x16x128
+        self.conv5 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.bn5 = nn.BatchNorm2d(128)
+        # 8x8x256
+        self.conv6 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
+        self.bn6 = nn.BatchNorm2d(256)
+        # 4x4x512
+        self.conv7 = nn.Conv2d(256, 512, kernel_size=3, padding=1)
+        self.bn7 = nn.BatchNorm2d(512)
 
-        self.fc1 = nn.Linear(128 * 4 * 4, 512)
-        self.fc2 = nn.Linear(512, 128)
-        self.dropout = nn.Dropout(p=0.5)
-        self.fc3 = nn.Linear(128, num_classes)
+        self.pool = nn.MaxPool2d(2, 2)
 
+        conv_output_size = self.get_conv_output((3, 256, 256))
+        self.fc1 = nn.Linear(conv_output_size, 1024)
+        self.fc2 = nn.Linear(1024, 256)
+        self.fc3 = nn.Linear(256, num_classes)
+
+        self.dropout = nn.Dropout(p=0.7)
         self.initialize_weights(init_method)
 
-    def forward(self, x):
-
-        x = self.pool(
-            F.relu(
-                self.bn1(
-                    self.conv1(x))))
-        x = self.pool(
-            F.relu(
-                self.bn2(
-                    self.conv2(x))))
-        x = self.pool(
-            F.relu(
-                self.bn3(
-                    self.conv3(x))))
-        x = self.pool(
-            F.relu(
-                self.bn4(
-                    self.conv4(x))))
-        x = self.pool(
-            F.relu(
-                self.bn5(
-                    self.conv5(x))))
-        x = self.pool(
-            F.relu(
-                self.bn6(
-                    self.conv6(x))))
-
-        x = x.view(x.size(0), -1)
-
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.dropout(x)
-        x = self.fc3(x)
-        return x
+    def get_conv_output(self, shape):
+        with torch.no_grad():
+            x = torch.zeros(1, *shape).to(device)
+            x = self.pool(F.relu(self.bn1(self.conv1(x))))
+            x = self.pool(F.relu(self.bn2(self.conv2(x))))
+            x = self.pool(F.relu(self.bn3(self.conv3(x))))
+            x = self.pool(F.relu(self.bn4(self.conv4(x))))
+            x = self.pool(F.relu(self.bn5(self.conv5(x))))
+            x = self.pool(F.relu(self.bn6(self.conv6(x))))
+            x = self.pool(F.relu(self.bn7(self.conv7(x))))
+        return x.numel()
 
     def initialize_weights(self, init_method):
         for m in self.modules():
@@ -117,6 +109,21 @@ class FruitsAndVegetablesRecognizer(nn.Module):
                     init.uniform_(m.weight, a=-0.01, b=0.01)
                 if m.bias is not None:
                     init.constant_(m.bias, 0.1)
+
+    def forward(self, x):
+        x = self.pool(F.relu(self.bn1(self.conv1(x))))
+        x = self.pool(F.relu(self.bn2(self.conv2(x))))
+        x = self.pool(F.relu(self.bn3(self.conv3(x))))
+        x = self.pool(F.relu(self.bn4(self.conv4(x))))
+        x = self.pool(F.relu(self.bn5(self.conv5(x))))
+        x = self.pool(F.relu(self.bn6(self.conv6(x))))
+        x = self.pool(F.relu(self.bn7(self.conv7(x))))
+
+        x = x.view(x.size(0), -1)
+        x = self.dropout(F.relu(self.fc1(x)))
+        x = self.dropout(F.relu(self.fc2(x)))
+        x = self.fc3(x)
+        return x
 
     def calculate_metrics(self, data_loader, criterion, device):
         total_loss = 0.0
@@ -166,12 +173,19 @@ class FruitsAndVegetablesRecognizer(nn.Module):
 
 model = FruitsAndVegetablesRecognizer(
     num_classes=36,
-    init_method="small_random",
+    init_method="xavier",
 ).to(device)
 
-summary(model, input_size=(3, 256, 256), batch_size=20)
-optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
-criterion = nn.CrossEntropyLoss()
+class_counts = Counter([label for _, label in combined_train_dataset])
+total_samples = len(combined_train_dataset)
+
+class_weights = [total_samples / class_counts[i] for i in range(len(class_counts))]
+class_weights = torch.tensor(class_weights, dtype=torch.float).to(device)
+
+
+summary(model, input_size=(3, 256, 256), batch_size=batch_size)
+optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+criterion = nn.CrossEntropyLoss(weight=class_weights)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3)
 
 train_accuracies = []
@@ -202,7 +216,7 @@ for epoch in range(num_epochs):
     train_accuracies.append(train_accuracy)
     print(f'Epoch [{epoch + 1}/{num_epochs}], Train Accuracy: {train_accuracy:.2f}%')
 
-# Validation
+    # Validation
     model.eval()
     correct_val = 0
     total_val = 0
@@ -218,7 +232,6 @@ for epoch in range(num_epochs):
     val_accuracies.append(val_accuracy)
     print(f'Epoch [{epoch + 1}/{num_epochs}], Validation Accuracy: {val_accuracy:.2f}%')
     scheduler.step(val_accuracy)
-
 
 # Test
 model.eval()
